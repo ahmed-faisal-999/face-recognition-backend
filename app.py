@@ -139,6 +139,75 @@ def save_embeddings(encodings, media_id):
     conn.commit()
     conn.close()
 
+
+@app.route('/search', methods=['POST'])
+def search_face():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files['file']
+    
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    # Load the uploaded image
+    image = face_recognition.load_image_file(file)
+    search_encoding = face_recognition.face_encodings(image)
+    
+    if not search_encoding:
+        return jsonify({"error": "No faces found in the image"}), 404
+    
+    search_encoding = search_encoding[0].tobytes()  # Take the first found encoding
+
+    # Find matches
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    c.execute('SELECT id, media_id, encoding FROM embeddings')
+    results = []
+    for row in c.fetchall():
+        existing_encoding = np.frombuffer(row[2], dtype=np.float64)
+        similarity = np.dot(search_encoding, existing_encoding) / (np.linalg.norm(search_encoding) * np.linalg.norm(existing_encoding))
+        if similarity >= 0.6:  # Adjust threshold if necessary
+            results.append({
+                "media_id": row[1],
+                "embedding_id": row[0],
+                "similarity": round(similarity * 100, 2)  # Convert to percentage
+            })
+
+    conn.close()
+    
+    if not results:
+        return jsonify({"error": "No matching faces found"}), 404
+
+    results.sort(key=lambda x: x["similarity"], reverse=True)
+
+    # Get unique media IDs from results
+    media_ids = set(result["media_id"] for result in results)
+
+    # Fetch media details
+    media_details = []
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT id, filename, path FROM media WHERE id IN ({})'.format(','.join('?' * len(media_ids))), list(media_ids))
+    
+    media_map = {media[0]: {"filename": media[1], "path": media[2]} for media in c.fetchall()}
+    
+    for result in results:
+        media_id = result["media_id"]
+        media_detail = media_map.get(media_id)
+        if media_detail:
+            media_details.append({
+                "id": media_id,
+                "filename": media_detail["filename"],
+                "path": media_detail["path"],
+                "similarity": result["similarity"]
+            })
+    
+    conn.close()
+    
+    return jsonify({"matches": media_details}), 200
+
 if __name__ == '__main__':
     create_db()
     app.run(debug=True)
